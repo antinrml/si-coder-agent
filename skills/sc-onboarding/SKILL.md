@@ -67,16 +67,31 @@ flowchart TD
 For users who clone the repo and want a scripted setup:
 
 ```bash
-bash install.sh                        # symlink skills to ~/.claude/skills/
-node bin/onboard.js                    # interactive readline wizard
+bash install.sh                        # symlink skills, then OFFER the wizard (interactive TTY only)
+bash install.sh --no-onboard           # symlink only; never prompt (CI / curl | bash)
+node bin/onboard.js                    # run the interactive wizard on its own
 node bin/onboard.js --domains convex,dokploy,github   # non-interactive checklist
 ```
 
-The CLI (`bin/onboard.js`) reads `steps/<domain>.md` only for the human-readable prompt
-text/context it shows per domain. The per-key **validators** are NOT in the step markdown —
-they live in the `VALIDATORS` registry in `skills/sc-onboarding/lib/onboarding-domains.js`
-(the same source of truth `scripts/scan-env.js` uses), which `bin/onboard.js` imports and
-applies before writing to `~/.bashrc`.
+`install.sh` chains into the wizard when run in an interactive terminal, so a fresh
+clone goes from install to configured in one flow. It auto-skips when stdin/stdout
+is not a TTY (piped installs), or with `--no-onboard`, so `curl … | bash` never hangs.
+
+The wizard, for each missing var:
+
+1. **Prints where to get it** — the dashboard URL (or a local command, e.g. `tailscale status`)
+   plus a one-line hint (required scope, path within the dashboard, "leave blank"). These come
+   from the `SECRET_SOURCES` registry in `skills/sc-onboarding/lib/onboarding-domains.js` — the
+   single source of truth that `scripts/scan-env.js` also prints next to each MISSING var.
+2. **Reads secrets without echoing them** — token-shaped values (`isSecret(key)`) are read in
+   raw mode with no terminal echo, so nothing lands in scrollback. Public values (URLs, publishable
+   keys, ids) stay visible. New vars default to hidden until registered (fail-closed).
+3. **Validates** against the `VALIDATORS` registry (same file) before writing.
+4. **Writes** only new values into the managed `~/.bashrc` block. Nothing is ever passed via argv,
+   so no secret reaches `ps` / `/proc/<pid>/cmdline` / shell history.
+
+The `SECRET_SOURCES` ↔ `DOMAIN_VARS` registries are kept in lockstep by
+`test/onboarding-sources.test.js` — adding a var without a source (or vice versa) fails the suite.
 
 ## Required vars per domain
 

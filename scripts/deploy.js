@@ -464,15 +464,17 @@ async function run() {
 
   const { project: projectName, app: appName, domain, target: rawTarget } = parseDeployArgs(process.argv.slice(2));
 
-  if (!apiUrl || !apiKey || !projectName || !appName || !githubToken) {
+  // Only ARGUMENT problems print the usage wall. A missing credential is a different
+  // failure with a different fix, and used to be buried in this same block — the preflight
+  // below names the exact var and the exact command instead.
+  if (!projectName || !appName) {
     console.error(
       'Usage: node deploy.js --project <PROJECT_NAME> --app <APP_NAME> [--domain <DOMAIN>] [--target dokploy|hybrid]\n' +
       '  (bare positionals also accepted: node deploy.js <PROJECT_NAME> <APP_NAME> [DOMAIN])\n' +
       '  --target dokploy (default): Dokploy frontend + self-hosted Convex compose.\n' +
       '  --target hybrid: Dokploy frontend (VPS) + Convex Cloud backend — needs CONVEX_DEPLOY_KEY.\n' +
-      '  Secrets are read ONLY from the environment (never argv, to avoid `ps aux` leakage):\n' +
-      '    DOKPLOY_API_URL, DOKPLOY_API_KEY, GITHUB_TOKEN (export these in ~/.bashrc).\n' +
-      '    CONVEX_DEPLOY_KEY (hybrid only). HOSTINGER_API_TOKEN is optional (DNS automation).'
+      '  Secrets are read ONLY from the environment (never argv, to avoid `ps aux` leakage).\n' +
+      '  Credentials are checked separately — run `sc doctor` to see what is set.'
     );
     process.exit(1);
   }
@@ -486,6 +488,29 @@ async function run() {
     console.error(`deploy.js: ${e.message}`);
     process.exit(1);
   }
+  // PREFLIGHT: every credential this target needs, checked in ONE place before any side
+  // effect. Previously each was discovered ad hoc, several phases in, so a missing token
+  // surfaced only after a repo had already been created and pushed. The registry in
+  // lib/providers.js is the source of truth, so this list can never drift from what
+  // `sc doctor` and `sc setup` use.
+  {
+    const { TARGET_PROVIDERS, PROVIDERS } = require('../lib/providers');
+    const byId = new Map(PROVIDERS.map(p => [p.id, p]));
+    const missing = [];
+    for (const id of TARGET_PROVIDERS[target] || []) {
+      for (const v of byId.get(id).vars) {
+        if (v.required && !process.env[v.key]) missing.push(`${v.key} (${id})`);
+      }
+    }
+    if (missing.length) {
+      console.error(`deploy.js: --target ${target} is missing required credentials:`);
+      for (const m of missing) console.error(`  • ${m}`);
+      console.error(`\nFix it interactively:  sc setup --target ${target}`);
+      console.error(`Then verify:           sc doctor --target ${target}`);
+      process.exit(1);
+    }
+  }
+
   const convexDeployKey = process.env.CONVEX_DEPLOY_KEY;
   let hybridConvexUrl = null;
   if (target === 'hybrid') {

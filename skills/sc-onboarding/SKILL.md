@@ -7,6 +7,29 @@ description: "Onboard new SI-Coder users. Scans env for credentials each sc-* do
 
 Use this skill when the user is setting up `si-coder-agent` for the first time, or after they install a new `/sc-*` domain skill that needs new credentials.
 
+## The `sc` console (preferred entry point)
+
+```
+sc providers                 what is configured, per provider
+sc providers show <id>       per-var detail + where to get each value
+sc providers set  <id>       re-enter (rotate) every var for one provider
+sc providers rm   <id>       remove its vars from the ~/.bashrc managed block
+sc setup [--target t]        interactive wizard for whatever is missing
+sc doctor [--target t]       LIVE check — calls each real API
+sc preflight --target t      the gate /sc-all runs
+```
+
+`providers` answers "is it configured" (presence + format). `doctor` answers "does it
+actually work" — a real call to the real API. A token can be perfectly well-formed and still
+be revoked, expired, or belong to the wrong account; only the live call catches that, and it
+also *names* what it reached (which GitHub login, which Cloudflare zones, which Vercel team),
+which is how you catch a credential pointed at the wrong account.
+
+The registry lives in `lib/providers.js`. Each var declares its own
+required/secret/source/validator inline, and `DOMAIN_VARS` / `VALIDATORS` / `SECRET_SOURCES`
+are derived from it — adding a provider means adding one object, and the three legacy maps
+cannot drift from it again.
+
 ## Two modes
 
 ### Mode A — AI-driven (default, interactive)

@@ -1,95 +1,20 @@
-// onboarding-domains.js — Single source of truth for the onboarding domain
-// registry, per-key validators, and the ~/.bashrc detection helper.
-// Required by both scripts/scan-env.js and bin/onboard.js so the domain
-// registry, CLI menu, and docs never drift.
+// onboarding-domains.js — compatibility view over lib/providers.js.
+//
+// The registry itself now lives in lib/providers.js, where every var carries its own
+// required/secret/source/validator inline. The three maps below used to be maintained by hand
+// side by side and had drifted in BOTH directions (vars read by code but never collected;
+// vars collected but read by nothing). They are derived now, so that class of drift is gone.
+//
+// Every export here keeps its original name and shape — scan-env.js, bin/onboard.js, the
+// wizard, and test/onboarding-sources.test.js all keep working unchanged.
 const path = require('path');
 const { readShellRc, parseEnvString } = require(path.resolve(__dirname, '../../../lib/env'));
+const {
+  DOMAIN_VARS, VALIDATORS, SECRET_SOURCES, DOMAIN_BLURBS, PROVIDERS, TARGET_PROVIDERS,
+} = require(path.resolve(__dirname, '../../../lib/providers'));
 
-const DOMAIN_VARS = {
-  github:    { required: ['GITHUB_TOKEN'], optional: [] },
-  dokploy:   { required: ['DOKPLOY_API_URL', 'DOKPLOY_API_KEY'], optional: [] },
-  convex:    { required: [], optional: ['CONVEX_ADMIN_KEY'] },
-  hostinger: { required: [], optional: ['HOSTINGER_API_TOKEN'] },
-  // STUB domains — vars pre-registered so /sc-onboarding can collect them.
-  // Scripts for these /sc-* skills are not implemented yet (exit code 2).
-  cf:        { required: [], optional: ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'] },
-  stripe:    { required: [], optional: ['STRIPE_SECRET_KEY', 'STRIPE_PUBLISHABLE_KEY', 'STRIPE_WEBHOOK_SECRET'] },
-  resend:    { required: [], optional: ['RESEND_API_KEY', 'RESEND_FROM_DOMAIN'] },
-  clerk:     { required: [], optional: ['CLERK_SECRET_KEY', 'NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY', 'NEXT_PUBLIC_CLERK_FRONTEND_API_URL'] },
-  vercel:        { required: ['VERCEL_TOKEN'], optional: ['VERCEL_TEAM_ID'] },
-  'convex-cloud':{ required: ['CONVEX_DEPLOY_KEY'], optional: ['CONVEX_DEPLOYMENT'] },
-  supabase:  { required: [], optional: ['SUPABASE_ACCESS_TOKEN', 'SUPABASE_ORG_ID'] },
-  sync:      { required: ['SYNC_ROLE', 'SYNC_VPS_TS_ADDR', 'SYNC_LOCAL_TS_ADDR'], optional: ['SYNC_REMOTE_USER', 'SYNC_REMOTE_PATH'] },
-};
-
-const VALIDATORS = {
-  GITHUB_TOKEN: v => (v.startsWith('ghp_') || v.startsWith('github_pat_')) && v.length >= 40,
-  DOKPLOY_API_URL: v => v.startsWith('https://'),
-  DOKPLOY_API_KEY: v => v.length >= 24,
-  HOSTINGER_API_TOKEN: v => v.length >= 32,
-  CONVEX_ADMIN_KEY: v => v.includes('|') && v.length >= 32,
-  CONVEX_DEPLOY_KEY: v => v.includes('|') && /^(prod|preview|project):/.test(v) && v.length >= 32,
-  CONVEX_DEPLOYMENT: v => v.length >= 6, // e.g. "prod:happy-animal-123" or a deployment name
-  CLOUDFLARE_API_TOKEN: v => v.length >= 32,
-  CLOUDFLARE_ACCOUNT_ID: v => v.length >= 16,
-  STRIPE_SECRET_KEY: v => /^sk_(test|live)_/.test(v),
-  STRIPE_PUBLISHABLE_KEY: v => /^pk_(test|live)_/.test(v),
-  STRIPE_WEBHOOK_SECRET: v => v.startsWith('whsec_'),
-  RESEND_API_KEY: v => v.startsWith('re_'),
-  RESEND_FROM_DOMAIN: v => /\./.test(v),
-  CLERK_SECRET_KEY: v => /^sk_(test|live)_/.test(v),
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: v => /^pk_(test|live)_/.test(v),
-  NEXT_PUBLIC_CLERK_FRONTEND_API_URL: v => v.startsWith('https://'),
-  VERCEL_TOKEN: v => v.length >= 24,
-  VERCEL_TEAM_ID: v => v.length >= 8,
-  SUPABASE_ACCESS_TOKEN: v => v.startsWith('sbp_'),
-  SUPABASE_ORG_ID: v => v.length >= 16,
-  SYNC_ROLE: v => v === 'vps' || v === 'local',
-  SYNC_VPS_TS_ADDR: v => v.length > 0 && /^[a-zA-Z0-9.:_-]+$/.test(v),
-  SYNC_LOCAL_TS_ADDR: v => v.length > 0 && /^[a-zA-Z0-9.:_-]+$/.test(v),
-  SYNC_REMOTE_USER: v => v.length > 0,
-  SYNC_REMOTE_PATH: v => v.length > 0,
-};
-
-// Where each credential comes from — the single source of truth the wizard,
-// scan-env output, and docs all read, so the "get it here" URL never drifts.
-//   secret : true  → the value must be read WITHOUT echoing it to the terminal.
-//   url    : the web dashboard where the value is minted.
-//   cmd    : a local command that reveals the value (used instead of url when the
-//            value is not fetched from a website, e.g. a Tailscale address).
-//   note   : one-line hint (scope, path within the dashboard, "leave blank", …).
-const SECRET_SOURCES = {
-  GITHUB_TOKEN:        { secret: true,  url: 'https://github.com/settings/tokens/new', note: 'scope: repo (full)' },
-  DOKPLOY_API_URL:     { secret: false, note: 'your Dokploy panel URL + /api, e.g. https://panel.example.com/api' },
-  DOKPLOY_API_KEY:     { secret: true,  url: '<your Dokploy panel>/dashboard/settings/profile', note: 'API/CLI section → Generate' },
-  HOSTINGER_API_TOKEN: { secret: true,  url: 'https://hpanel.hostinger.com/profile/api' },
-  CONVEX_ADMIN_KEY:    { secret: true,  note: 'auto-generated by /sc-convex on deploy — usually leave blank' },
-  CONVEX_DEPLOY_KEY:   { secret: true,  url: 'https://dashboard.convex.dev/deployment/settings', note: 'production deployment → Generate Production Deploy Key' },
-  CONVEX_DEPLOYMENT:   { secret: false, note: 'written by `npx convex dev`; leave blank for CI' },
-  CLOUDFLARE_API_TOKEN:  { secret: true,  url: 'https://dash.cloudflare.com/profile/api-tokens', note: 'Zone:Read + Zone:DNS:Edit, scoped to your zone' },
-  CLOUDFLARE_ACCOUNT_ID: { secret: false, url: 'https://dash.cloudflare.com', note: 'right sidebar → Account ID' },
-  STRIPE_SECRET_KEY:      { secret: true,  url: 'https://dashboard.stripe.com/apikeys' },
-  STRIPE_PUBLISHABLE_KEY: { secret: false, url: 'https://dashboard.stripe.com/apikeys' },
-  STRIPE_WEBHOOK_SECRET:  { secret: true,  url: 'https://dashboard.stripe.com/webhooks', note: 'add endpoint → Signing secret (whsec_…)' },
-  RESEND_API_KEY:      { secret: true,  url: 'https://resend.com/api-keys' },
-  RESEND_FROM_DOMAIN:  { secret: false, url: 'https://resend.com/domains', note: 'a verified sender domain' },
-  CLERK_SECRET_KEY:                    { secret: true,  url: 'https://dashboard.clerk.com', note: 'API Keys → Secret key' },
-  NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:   { secret: false, url: 'https://dashboard.clerk.com', note: 'API Keys → Publishable key' },
-  NEXT_PUBLIC_CLERK_FRONTEND_API_URL:  { secret: false, url: 'https://dashboard.clerk.com', note: 'API Keys → Frontend API URL' },
-  VERCEL_TOKEN:   { secret: true,  url: 'https://vercel.com/account/tokens', note: 'scope: Full Account' },
-  VERCEL_TEAM_ID: { secret: false, url: 'https://vercel.com/dashboard', note: 'Team → Settings → General → Team ID' },
-  SUPABASE_ACCESS_TOKEN: { secret: true,  url: 'https://supabase.com/dashboard/account/tokens' },
-  SUPABASE_ORG_ID:       { secret: false, url: 'https://supabase.com/dashboard/org/_/general' },
-  SYNC_ROLE:          { secret: false, note: "this machine's role — exactly 'vps' or 'local'" },
-  SYNC_VPS_TS_ADDR:   { secret: false, cmd: 'tailscale status   (or on the vps: tailscale ip -4)' },
-  SYNC_LOCAL_TS_ADDR: { secret: false, cmd: 'tailscale status   (or on local: tailscale ip -4)' },
-  SYNC_REMOTE_USER:   { secret: false, note: 'ssh user on the other machine (defaults to the current user)' },
-  SYNC_REMOTE_PATH:   { secret: false, note: "repo path on the other machine (defaults to this machine's)" },
-};
-
-// Default to SECRET when a var is not registered: a brand-new credential added to
-// DOMAIN_VARS but not yet to SECRET_SOURCES is hidden by the wizard rather than
-// accidentally echoed. (The drift test flags the missing entry so it gets filled in.)
+// Default to SECRET when a var is not registered: a brand-new credential added to the registry
+// but somehow missing a source entry is hidden rather than accidentally echoed.
 function isSecret(key) {
   const s = SECRET_SOURCES[key];
   return s ? s.secret !== false : true;
@@ -106,7 +31,7 @@ function sourceLine(key) {
 }
 
 // Parse ~/.bashrc into a plain KEY->value map, stripping the leading `export `
-// so the result is comparable to process.env. Shared by both scripts.
+// so the result is comparable to process.env.
 function readShellRcEnv() {
   const env = parseEnvString(readShellRc().replace(/^\s*export\s+/gm, ''));
   // Reverse the POSIX single-quote escaping that shSingleQuote/appendExportToShellRc emit:
@@ -116,4 +41,7 @@ function readShellRcEnv() {
   return env;
 }
 
-module.exports = { DOMAIN_VARS, VALIDATORS, SECRET_SOURCES, isSecret, sourceLine, readShellRcEnv };
+module.exports = {
+  DOMAIN_VARS, VALIDATORS, SECRET_SOURCES, DOMAIN_BLURBS, PROVIDERS, TARGET_PROVIDERS,
+  isSecret, sourceLine, readShellRcEnv,
+};

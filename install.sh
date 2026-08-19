@@ -88,11 +88,12 @@ if [[ "$run_onboarding" == "1" ]]; then
   echo ""
   read -r -p "Set up credentials now with the interactive wizard? [Y/n] " _ans
   if [[ ! "$_ans" =~ ^[Nn] ]]; then
-    node "$REPO_DIR/bin/onboard.js"
+    node "$REPO_DIR/bin/sc.js" setup
   else
-    echo "Skipped. Run it anytime:  node $REPO_DIR/bin/onboard.js"
+    echo "Skipped. Run it anytime:  node $REPO_DIR/bin/sc.js setup"
   fi
 else
   echo ""
-  echo "Set up credentials when ready:  node $REPO_DIR/bin/onboard.js"
+  echo "Set up credentials when ready:  node $REPO_DIR/bin/sc.js setup"
+  echo "Verify them live with:          node $REPO_DIR/bin/sc.js doctor"
 fi

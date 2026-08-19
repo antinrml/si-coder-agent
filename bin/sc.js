@@ -16,10 +16,12 @@ const {
 } = require(path.resolve(__dirname, '../lib/providers'));
 const { isSecret, sourceLine, readShellRcEnv } =
   require(path.resolve(__dirname, '../skills/sc-onboarding/lib/onboarding-domains'));
-const { appendExportToShellRc, removeExportsFromShellRc, scanProcessEnv } =
+const { appendExportToShellRc, removeExportsFromShellRc, scanProcessEnv, shSingleQuote } =
   require(path.resolve(__dirname, '../lib/env'));
+const { spawnSync } = require('child_process');
 const { askVisible, askHidden, redactValue, isInteractive, confirm, selectOne, selectMany } =
   require(path.resolve(__dirname, '../lib/prompt'));
+const P = require(path.resolve(__dirname, '../lib/profiles'));
 
 const byId = new Map(PROVIDERS.map(p => [p.id, p]));
 
@@ -36,16 +38,30 @@ function parseArgs(argv) {
   return out;
 }
 
-// process.env wins over ~/.bashrc: a value exported in the current shell is what the
-// sc-* scripts will actually see, regardless of what the file says.
-function currentEnv() {
-  const rc = readShellRcEnv();
-  const merged = { ...rc };
-  for (const [k, v] of Object.entries(process.env)) if (v) merged[k] = v;
-  return merged;
+// Resolution order: profile (if one governs this directory) > process.env > ~/.bashrc.
+// The profile deliberately outranks the shell — see the precedence note in lib/profiles.js.
+let NO_PROFILE = false;
+let _envCache = null;
+function currentEnvFull() {
+  if (!_envCache) _envCache = P.loadEnvFor(process.cwd(), { noProfile: NO_PROFILE, shellRcEnv: readShellRcEnv() });
+  return _envCache;
+}
+function currentEnv() { return currentEnvFull().env; }
+
+// One line, printed once, so it is never a mystery which identity a command ran as.
+function profileBanner() {
+  const { profile, reason } = currentEnvFull();
+  const { shadowed } = currentEnvFull();
+  if (profile) {
+    console.log(`  👤 profile: ${profile}  (${reason})`);
+    if (shadowed.length) console.log(`     ignoring ${shadowed.length} var(s) from the shell not owned by this profile: ${shadowed.join(', ')}`);
+  }
+  else if (P.listProfiles().length) console.log(`  👤 profile: none  (${reason}) — \`sc user which\` explains`);
 }
 
 function sourceOf(key) {
+  const { profile } = currentEnvFull();
+  if (profile && P.readProfile(profile)[key]) return `profile:${profile}`;
   if (process.env[key]) return 'shell';
   if (readShellRcEnv()[key]) return '.bashrc';
   return '—';
@@ -82,6 +98,7 @@ function cmdProvidersList(args) {
   const env = currentEnv();
   const ids = resolveIds(args) || PROVIDERS.map(p => p.id);
   console.log('\n🔌 providers\n');
+  profileBanner();
   for (const id of ids) {
     const p = byId.get(id);
     const states = p.vars.map(v => varState(v, env));
@@ -137,14 +154,25 @@ function providerItems() {
       label: `${mark} ${p.id.padEnd(14)} ${String(set).padStart(2)}/${p.vars.length}`,
       hint: `${p.status === 'stub' ? '(stub) ' : ''}${p.blurb}`,
       needsAttention: missing > 0 || invalid > 0,
+      stub: p.status === 'stub',
+      hasAny: set > 0,
     };
   });
 }
 
+// Lenses over the same provider list. "needs attention" first is deliberate: it is the
+// reason you opened this menu almost every time.
+const PROVIDER_TABS = [
+  { id: 'all',       label: 'All',      filter: null },
+  { id: 'attention', label: 'Needs fix', filter: it => it.needsAttention },
+  { id: 'ready',     label: 'Ready',    filter: it => !it.needsAttention && !it.stub && it.hasAny },
+  { id: 'stub',      label: 'Stubs',    filter: it => it.stub },
+];
+
 // Pick one provider by arrow keys when the id was not given on the command line.
 async function pickProvider(title) {
   if (!isInteractive()) die('provider id required on a non-TTY, e.g. `sc providers show cf`');
-  const id = await selectOne(title, providerItems());
+  const id = await selectOne(title, providerItems(), PROVIDER_TABS);
   if (!id) { console.log('cancelled'); process.exit(0); }
   return id;
 }
@@ -189,6 +217,34 @@ async function collect(ids, { force = false } = {}) {
   return updates;
 }
 
+
+// Where a newly entered credential is stored.
+// Backwards compatible on purpose: a machine with no profiles keeps using the ~/.bashrc
+// managed block exactly as before. The moment a profile exists, writes go there instead —
+// otherwise a second identity would silently land in the first one's shell.
+function writeTarget() {
+  const { profile } = currentEnvFull();
+  if (profile) return { kind: 'profile', name: profile };
+  if (P.listProfiles().length) return { kind: 'profile-unset', name: null };
+  return { kind: 'bashrc', name: null };
+}
+
+function persist(updates) {
+  const t = writeTarget();
+  if (t.kind === 'profile') {
+    P.writeProfile(t.name, updates);
+    console.log(`\n✅ Wrote ${Object.keys(updates).length} value(s) to profile "${t.name}" (${P.profilePath(t.name)})`);
+    console.log('   Run `sc env` (or `sc run -- <cmd>`) to use them outside sc.');
+    return;
+  }
+  if (t.kind === 'profile-unset') {
+    die('profiles exist but none governs this directory — pick one with `sc user use <name>` or map it with `sc user map . <name>`');
+  }
+  appendExportToShellRc(updates);
+  console.log(`\n✅ Wrote ${Object.keys(updates).length} export(s) to ~/.bashrc`);
+  console.log('   Next: source ~/.bashrc');
+}
+
 async function cmdSetup(args) {
   if (!isInteractive()) die('sc setup needs a TTY. Non-interactive? Use:\n   printf \'KEY=VALUE\\n\' | node skills/sc-onboarding/scripts/scan-env.js --write-stdin');
   console.log('\n🚀 si-coder setup\n');
@@ -198,15 +254,14 @@ async function cmdSetup(args) {
     // Pre-tick whatever is actually incomplete: the common case is "fix what is broken",
     // and starting from an empty list would make the user re-derive that by hand.
     const pre = items.filter(i => i.needsAttention).map(i => i.id);
-    ids = await selectMany('Which providers do you want to set up?', items, pre);
+    ids = await selectMany('Which providers do you want to set up?', items, pre, PROVIDER_TABS);
     if (ids === null) { console.log('cancelled'); return; }
     if (ids.length === 0) { console.log('Nothing selected.'); return; }
   }
   const updates = await collect(ids, { force: Boolean(args.force) });
   if (Object.keys(updates).length === 0) { console.log('\n✅ Nothing to write — everything asked for is already set.'); return; }
-  appendExportToShellRc(updates);
-  console.log(`\n✅ Wrote ${Object.keys(updates).length} export(s) to ~/.bashrc`);
-  console.log('\nNext:\n  source ~/.bashrc\n  sc doctor');
+  persist(updates);
+  console.log('  Then: sc doctor');
 }
 
 async function cmdProvidersSet(id) {
@@ -216,8 +271,7 @@ async function cmdProvidersSet(id) {
   console.log(`\n🔁 re-entering every var for "${id}" (existing values will be replaced)\n`);
   const updates = await collect([id], { force: true });
   if (Object.keys(updates).length === 0) { console.log('\nNothing entered — no change.'); return; }
-  appendExportToShellRc(updates);
-  console.log(`\n✅ Wrote ${Object.keys(updates).length} export(s). Run: source ~/.bashrc`);
+  persist(updates);
 }
 
 async function cmdProvidersRm(id, args) {
@@ -229,12 +283,197 @@ async function cmdProvidersRm(id, args) {
     if (!isInteractive()) die('refusing to remove without --yes on a non-TTY.');
     if (!await confirm('Remove them?')) { console.log('aborted'); return; }
   }
+  const t = writeTarget();
+  if (t.kind === 'profile') {
+    const removed = P.removeFromProfile(t.name, keys);
+    console.log(removed.length ? `✅ removed from profile "${t.name}": ${removed.join(', ')}` : `nothing to remove in profile "${t.name}"`);
+    return;
+  }
   const { removed, unmanaged } = removeExportsFromShellRc(keys);
   console.log(removed.length ? `✅ removed: ${removed.join(', ')}` : 'nothing to remove in the managed block');
   if (unmanaged.length) {
     console.log(`⚠️ still exported OUTSIDE the si-coder block (left untouched, edit ~/.bashrc by hand): ${unmanaged.join(', ')}`);
   }
   console.log('Run: source ~/.bashrc   (a removed var stays in THIS shell until you start a new one)');
+}
+
+
+// ---------------------------------------------------------------------------
+// user / profile commands
+// ---------------------------------------------------------------------------
+function ensureScMd() {
+  const st = P.parseScMd();
+  if (!st.exists) P.writeScMd({ active: null, mappings: [] });
+  return P.parseScMd();
+}
+
+function cmdUserList() {
+  const names = P.listProfiles();
+  const st = ensureScMd();
+  const { profile, reason } = P.resolveProfile();
+  console.log('\n👥 profiles\n');
+  if (!names.length) {
+    console.log('  (none yet)\n\n  sc user add <name>              create one');
+    console.log('  sc user add <name> --from-shell import what is exported right now\n');
+    return;
+  }
+  for (const n of names) {
+    const keys = Object.keys(P.readProfile(n)).length;
+    const marks = [];
+    if (n === st.active) marks.push('active');
+    if (n === profile) marks.push('current dir');
+    console.log(`  ${n === profile ? '❯' : ' '} ${n.padEnd(18)} ${String(keys).padStart(2)} value(s)${marks.length ? '   [' + marks.join(', ') + ']' : ''}`);
+  }
+  console.log(`\n  here: ${profile || 'none'}  (${reason})`);
+  console.log(`  map:  ${P.SC_MD}\n`);
+}
+
+function cmdUserWhich() {
+  const { profile, reason, mapping, state } = P.resolveProfile();
+  console.log(`\n📍 cwd      : ${process.cwd()}`);
+  console.log(`   profile  : ${profile || '(none)'}`);
+  console.log(`   because  : ${reason}`);
+  if (mapping) console.log(`   rule     : ${mapping.path} → ${mapping.profile}`);
+  if (profile && !P.profileExists(profile)) {
+    console.log(`   ⚠️ sc.md names "${profile}" but ~/.config/si-coder/profiles/${profile}.env does not exist`);
+  }
+  if (state.mappings.length) {
+    console.log('\n   all rules (longest match wins):');
+    for (const m of state.mappings) {
+      const dead = P.profileExists(m.profile) ? '' : '   ⚠️ profile missing';
+      console.log(`     ${m.path.padEnd(38)} → ${m.profile}${dead}`);
+    }
+  }
+  console.log(`\n   sc.md    : ${P.SC_MD}\n`);
+}
+
+async function cmdUserAdd(name, args) {
+  if (!name) {
+    if (!isInteractive()) die('usage: sc user add <name> [--from-shell]');
+    name = await askVisible('New profile name: ');
+  }
+  P.assertName(name);
+  if (P.profileExists(name) && !args.force) die(`profile "${name}" already exists (use --force to overwrite)`);
+  let updates = {};
+  if (args['from-shell']) {
+    // Migration path off the single-identity ~/.bashrc: snapshot every registry var that is
+    // currently visible, so the first profile is a copy of what already worked.
+    const env = { ...readShellRcEnv(), ...process.env };
+    for (const v of PROVIDERS.flatMap(p => p.vars)) if (env[v.key]) updates[v.key] = env[v.key];
+    console.log(`  imported ${Object.keys(updates).length} value(s) from the current environment`);
+  }
+  P.writeProfile(name, updates);
+  const st = ensureScMd();
+  if (!st.active) P.writeScMd({ active: name, mappings: st.mappings });
+  console.log(`✅ profile "${name}" created at ${P.profilePath(name)}`);
+  if (!st.active) console.log(`   set as the active profile`);
+  console.log(`\n   next: sc user map <folder> ${name}    (or: sc user use ${name})`);
+}
+
+function cmdUserUse(name) {
+  if (!name) die('usage: sc user use <name>');
+  if (!P.profileExists(name)) die(`no such profile "${name}" — sc user list`);
+  const st = ensureScMd();
+  P.writeScMd({ active: name, mappings: st.mappings });
+  console.log(`✅ active profile: ${name}`);
+}
+
+function cmdUserMap(dir, name) {
+  if (!dir || !name) die('usage: sc user map <folder> <profile>');
+  if (!P.profileExists(name)) die(`no such profile "${name}" — sc user list`);
+  const st = ensureScMd();
+  // Store what the user typed (so `~` stays readable in sc.md) but de-dupe on the resolved
+  // path, or `.` and `~/x` could quietly create two rules for one directory.
+  const shown = dir === '.' ? process.cwd() : dir;
+  const resolved = path.resolve(P.expandHome(shown));
+  const mappings = st.mappings.filter(m => m.resolved !== resolved);
+  mappings.push({ path: shown, resolved, profile: name });
+  mappings.sort((a, b) => a.resolved.localeCompare(b.resolved));
+  P.writeScMd({ active: st.active, mappings });
+  console.log(`✅ ${shown} → ${name}`);
+}
+
+function cmdUserUnmap(dir) {
+  if (!dir) die('usage: sc user unmap <folder>');
+  const st = ensureScMd();
+  const resolved = path.resolve(P.expandHome(dir === '.' ? process.cwd() : dir));
+  const kept = st.mappings.filter(m => m.resolved !== resolved);
+  if (kept.length === st.mappings.length) die(`no rule for ${dir}`);
+  P.writeScMd({ active: st.active, mappings: kept });
+  console.log(`✅ removed the rule for ${dir}`);
+}
+
+async function cmdUserRm(name, args) {
+  if (!name) die('usage: sc user rm <name> [--yes]');
+  if (!P.profileExists(name)) die(`no such profile "${name}"`);
+  if (!args.yes) {
+    if (!isInteractive()) die('refusing to delete a profile without --yes on a non-TTY');
+    if (!await confirm(`Delete profile "${name}" and its stored credentials?`)) { console.log('aborted'); return; }
+  }
+  P.deleteProfile(name);
+  const st = ensureScMd();
+  P.writeScMd({
+    active: st.active === name ? null : st.active,
+    mappings: st.mappings.filter(m => m.profile !== name),
+  });
+  console.log(`✅ deleted profile "${name}" and any sc.md rules pointing at it`);
+}
+
+// `eval "$(sc env)"` — the bridge for anything that reads process.env and is not launched
+// through `sc run`.
+function cmdEnv(args) {
+  const { own, profile, shadowed } = currentEnvFull();
+  if (!profile) { console.error('# no profile governs this directory — nothing to export'); process.exit(1); }
+  const keys = Object.keys(own).sort();
+  console.error(`# profile: ${profile} — ${keys.length} value(s)`);
+  for (const k of keys) console.log(`export ${k}=${shSingleQuote(own[k])}`);
+  // Anything the shell still carries from another identity is actively unset, not just
+  // left unexported — otherwise `eval "$(sc env)"` would leave it in place and in effect.
+  for (const k of shadowed) console.log(`unset ${k}`);
+  if (shadowed.length) console.error(`# unset ${shadowed.length} var(s) not owned by this profile: ${shadowed.join(', ')}`);
+}
+
+// Run any command with the resolved profile injected. Keeps secrets out of the parent shell.
+function cmdRun(args) {
+  const idx = process.argv.indexOf('--');
+  const cmd = idx === -1 ? [] : process.argv.slice(idx + 1);
+  if (!cmd.length) die('usage: sc run -- <command> [args...]');
+  const { env, profile, shadowed } = currentEnvFull();
+  if (profile) {
+    console.error(`👤 running as profile "${profile}"`);
+    if (shadowed.length) console.error(`   unset for the child: ${shadowed.join(', ')}`);
+  }
+  // Pass `env` AS the child's environment, never merged back over process.env — the merge is
+  // what re-introduced the very keys loadEnvFor had just removed. `env` already carries
+  // everything inherited (PATH, HOME, …) minus the credentials this profile does not own.
+  const r = spawnSync(cmd[0], cmd.slice(1), { stdio: 'inherit', env });
+  process.exit(r.status === null ? 1 : r.status);
+}
+
+async function cmdUser(sub, arg, arg2, args) {
+  switch (sub) {
+    case undefined:
+    case 'list':  return cmdUserList();
+    case 'which': return cmdUserWhich();
+    case 'add':   return cmdUserAdd(arg, args);
+    case 'use': {
+      if (!arg && isInteractive()) {
+        const names = P.listProfiles();
+        if (!names.length) die('no profiles yet — sc user add <name>');
+        const picked = await selectOne('Use which profile?', names.map(n => ({
+          id: n, label: n.padEnd(18), hint: `${Object.keys(P.readProfile(n)).length} value(s)`,
+        })));
+        if (!picked) { console.log('cancelled'); return; }
+        return cmdUserUse(picked);
+      }
+      return cmdUserUse(arg);
+    }
+    case 'map':   return cmdUserMap(arg, arg2);
+    case 'unmap': return cmdUserUnmap(arg);
+    case 'rm':    return cmdUserRm(arg, args);
+    case 'edit':  console.log(P.SC_MD); return;
+    default:      return die(`unknown: sc user ${sub}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +483,8 @@ async function cmdDoctor(args) {
   const env = currentEnv();
   const ids = resolveIds(args) || PROVIDERS.filter(p => p.status !== 'stub').map(p => p.id);
   console.log('\n🩺 sc doctor — live verification against each provider API\n');
+  profileBanner();
+  console.log('');
   let fails = 0, checked = 0;
   const results = await Promise.all(ids.map(async id => {
     const p = byId.get(id);
@@ -316,6 +557,8 @@ async function cmdMenu() {
     { id: 'set',       label: 'set      ', hint: 'rotate one provider\'s credentials' },
     { id: 'rm',        label: 'rm       ', hint: "remove one provider's vars from ~/.bashrc" },
     { id: 'preflight', label: 'preflight', hint: 'check a /sc-all deploy target' },
+    { id: 'users',     label: 'users    ', hint: 'profiles, and which folder uses which' },
+    { id: 'which',     label: 'which    ', hint: 'why this directory resolves to that profile' },
     { id: 'quit',      label: 'quit     ', hint: '' },
   ]);
   switch (action) {
@@ -325,6 +568,8 @@ async function cmdMenu() {
     case 'show':      return cmdProvidersShow(undefined);
     case 'set':       return cmdProvidersSet(undefined);
     case 'rm':        return cmdProvidersRm(undefined, {});
+    case 'users':     return cmdUserList();
+    case 'which':     return cmdUserWhich();
     case 'preflight': {
       const target = await selectOne('Which /sc-all target?', Object.entries(TARGET_PROVIDERS)
         .map(([t, ids]) => ({ id: t, label: t.padEnd(9), hint: `needs: ${ids.join(', ')}` })));
@@ -351,6 +596,19 @@ sc — si-coder provider console
   sc preflight --target <dokploy|hybrid|vercel>
                                     gate used by /sc-all
 
+  sc user                           list profiles + which one governs this directory
+  sc user which                     why this directory resolves to that profile
+  sc user add <name> [--from-shell] create a profile (optionally import the current env)
+  sc user use <name>                set the fallback (active) profile
+  sc user map <folder> <name>       bind a folder (and its children) to a profile
+  sc user unmap <folder>            drop that rule
+  sc user rm <name> [--yes]         delete a profile and its stored credentials
+  sc user edit                      print the path to sc.md
+  sc env                            print export lines: eval "$(sc env)"
+  sc run -- <cmd> ...               run a command with the resolved profile injected
+
+  --no-profile                      ignore profiles for this one command
+
   providers: ${PROVIDERS.map(p => p.id).join(', ')}
   targets  : ${Object.keys(TARGET_PROVIDERS).join(', ')}
 `);
@@ -358,6 +616,7 @@ sc — si-coder provider console
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  NO_PROFILE = Boolean(args['no-profile']);
   const [cmd, sub, arg] = args._;
   switch (cmd) {
     case 'providers':
@@ -366,6 +625,9 @@ async function main() {
       if (sub === 'set') return cmdProvidersSet(arg);
       if (sub === 'rm') return cmdProvidersRm(arg, args);
       return die(`unknown: providers ${sub}`);
+    case 'user':      return cmdUser(sub, arg, args._[3], args);
+    case 'env':       return cmdEnv(args);
+    case 'run':       return cmdRun(args);
     case 'setup':     return cmdSetup(args);
     case 'doctor':    return cmdDoctor(args);
     case 'preflight': return cmdPreflight(args);

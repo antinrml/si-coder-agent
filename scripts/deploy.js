@@ -494,6 +494,23 @@ async function run() {
   // lib/providers.js is the source of truth, so this list can never drift from what
   // `sc doctor` and `sc setup` use.
   {
+    // Apply the profile that governs THIS directory before reading a single credential.
+    // Without it, `sc user map` would be advisory only: /sc-all would keep using whatever
+    // the login shell exported, which is exactly the cross-identity mistake profiles exist
+    // to prevent. --no-profile opts out for a one-off.
+    if (!process.argv.includes('--no-profile')) {
+      const P = require('../lib/profiles');
+      const { env, profile, shadowed } = P.loadEnvFor(process.cwd());
+      if (profile) {
+        console.log(`👤 profile: ${profile}`);
+        for (const k of P.REGISTRY_KEYS) {
+          if (env[k] !== undefined) process.env[k] = env[k];
+          else delete process.env[k];
+        }
+        if (shadowed.length) console.log(`   ignoring ${shadowed.length} shell var(s) this profile does not own: ${shadowed.join(', ')}`);
+      }
+    }
+
     const { TARGET_PROVIDERS, PROVIDERS } = require('../lib/providers');
     const byId = new Map(PROVIDERS.map(p => [p.id, p]));
     const missing = [];

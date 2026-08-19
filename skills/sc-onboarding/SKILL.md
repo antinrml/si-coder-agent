@@ -32,6 +32,54 @@ already on screen, and no silent typos:
 Values themselves are still typed — a token has to be pasted — but secrets are read hidden
 and never reach argv.
 
+### More than one identity: profiles + `sc.md`
+
+One `~/.bashrc` holds one set of credentials. That breaks the moment two machines, two
+Cloudflare accounts, or two clients are in play — and the failure is silent: a stale `export`
+from a login shell is enough to deploy with the wrong account's token.
+
+```
+sc user                           profiles + which one governs this directory
+sc user which                     the resolution, and why
+sc user add <name> [--from-shell] create one (--from-shell imports what is exported now)
+sc user use <name>                set the fallback profile
+sc user map <folder> <name>       bind a folder AND its children to a profile
+sc user unmap <folder>            drop that rule
+sc user rm <name> [--yes]         delete a profile and its credentials
+sc env                            eval "$(sc env)"  — apply it to the current shell
+sc run -- <cmd> ...               run one command under the resolved profile
+--no-profile                      ignore profiles for this one command
+```
+
+Credentials live in `~/.config/si-coder/profiles/<name>.env` (0600). The folder map lives in
+`~/.config/si-coder/sc.md` — plain markdown, meant to be edited by hand:
+
+```markdown
+Active profile: `antinrml`
+
+| Path | Profile |
+| --- | --- |
+| `~/projects/antinrml` | `antinrml` |
+| `~/projects/client-x` | `client-x` |
+```
+
+**Longest matching path wins**, so a subdirectory can override its parent, and `/srv/app`
+never matches `/srv/application` — matching is path-segment aware.
+
+**Two rules that make this actually safe, both deliberate:**
+
+1. **A profile OUTRANKS the shell.** The usual instinct is "the exported variable wins", but
+   the failure modes are not symmetric: a profile losing to a stale export means deploying
+   with someone else's credentials, while a profile winning means an intentional one-off is
+   ignored — and `--no-profile` undoes that.
+2. **Credentials the profile does not own are REMOVED, not merged.** Standing in a folder
+   mapped to `client-x` with another account's `DOKPLOY_API_KEY` still exported, a merge
+   would happily use it. Only registry keys are stripped; `PATH`, `HOME` and the rest survive.
+   `sc env` emits `unset` lines for them, and every command prints what it ignored.
+
+Backwards compatible: with no profiles, writes keep going to the `~/.bashrc` managed block
+exactly as before. `sc user add <name> --from-shell` is the migration path.
+
 `providers` answers "is it configured" (presence + format). `doctor` answers "does it
 actually work" — a real call to the real API. A token can be perfectly well-formed and still
 be revoked, expired, or belong to the wrong account; only the live call catches that, and it

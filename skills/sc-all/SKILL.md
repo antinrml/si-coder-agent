@@ -59,6 +59,12 @@ generic usage wall.
 
 Exit codes: `0` ready · `1` missing/refused · `2` written, re-source and re-run.
 
+**Profiles apply here.** If `~/.config/si-coder/sc.md` maps the current directory to a
+profile, `scripts/deploy.js` loads that profile's credentials **and unsets every registry
+credential it does not own** before reading anything — so a folder bound to one identity
+cannot deploy with another's leftovers still exported. It prints `👤 profile: <name>` and
+what it ignored. `--no-profile` bypasses it. See `/sc-onboarding` for the full model.
+
 Required env (see `sc setup`, or `/sc-onboarding`, if any are missing):
 - `GITHUB_TOKEN`
 - `DOKPLOY_API_URL`, `DOKPLOY_API_KEY`

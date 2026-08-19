@@ -19,6 +19,16 @@ description: "Quick-reference card for the whole SI-Coder /sc-* skill bundle —
 
 `providers` = configured (presence + format). `doctor` = actually works (real API call).
 
+| `sc user` | profiles, and which folder uses which |
+| `sc user which` | why this directory resolves to that profile |
+| `sc user add <n> [--from-shell]` | create a profile (optionally import current env) |
+| `sc user map <folder> <n>` | bind a folder + children to a profile |
+| `sc env` / `sc run -- <cmd>` | apply the resolved profile to a shell / one command |
+
+Multiple identities on one machine: credentials in `~/.config/si-coder/profiles/<n>.env`,
+the folder map in `~/.config/si-coder/sc.md`. Longest matching path wins. A profile
+**overrides** the shell and **removes** credentials it does not own — `--no-profile` opts out.
+
 Run `sc` with no arguments for an arrow-key menu. Any command that picks a provider or a
 target opens a list instead of asking you to type the name: `↑/↓` move, `Space` toggle
 (multi-select), `a` all/none, `Enter` confirm, `Esc` cancel.

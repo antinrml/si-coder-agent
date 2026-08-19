@@ -19,6 +19,19 @@ sc doctor [--target t]       LIVE check — calls each real API
 sc preflight --target t      the gate /sc-all runs
 ```
 
+Everything that picks *something* is arrow-key driven — no retyping identifiers that are
+already on screen, and no silent typos:
+
+- **`sc`** with no arguments opens the console menu (on a pipe it still prints usage, so
+  scripts are unaffected).
+- **`sc setup`** shows a checkbox list of all providers with whatever is incomplete
+  **pre-ticked**. `↑/↓` move · `Space` toggle · `a` all/none · `Enter` confirm · `Esc` cancel.
+  (`j`/`k` work too.)
+- **`sc providers show|set|rm`** with no id opens a single-select list.
+
+Values themselves are still typed — a token has to be pasted — but secrets are read hidden
+and never reach argv.
+
 `providers` answers "is it configured" (presence + format). `doctor` answers "does it
 actually work" — a real call to the real API. A token can be perfectly well-formed and still
 be revoked, expired, or belong to the wrong account; only the live call catches that, and it

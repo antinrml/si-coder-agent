@@ -140,3 +140,33 @@ test('SCC-3: unknown target and unknown provider are rejected, not guessed', () 
     assert.strictEqual(code, 1, `${args.join(' ')} should exit 1`);
   }
 });
+
+test('SCC-4: bare `sc` stays scriptable — usage on a pipe, never a menu', () => {
+  const out = execFileSync(process.execPath, [path.join(ROOT, 'bin/sc.js')],
+    { input: '', encoding: 'utf8', timeout: 20000 });
+  assert.match(out, /si-coder provider console/);
+  assert.match(out, /sc preflight --target/, 'usage must still list the commands');
+  assert.doesNotMatch(out, /\u001b\[\?25l/, 'must not emit cursor-hiding escapes to a pipe');
+});
+
+test('SCC-5: an id-less providers subcommand fails loudly off a TTY instead of waiting', () => {
+  let out = '', code = 0;
+  try {
+    execFileSync(process.execPath, [path.join(ROOT, 'bin/sc.js'), 'providers', 'show'],
+      { input: '', encoding: 'utf8', timeout: 20000 });
+  } catch (e) { out = `${e.stdout || ''}${e.stderr || ''}`; code = e.status; }
+  assert.strictEqual(code, 1);
+  assert.match(out, /non-TTY/);
+});
+
+test('SCC-6: the pickers are exported and take the documented shape', () => {
+  const { selectOne, selectMany } = require(path.join(ROOT, 'lib/prompt'));
+  assert.strictEqual(typeof selectOne, 'function');
+  assert.strictEqual(typeof selectMany, 'function');
+  // Do NOT call them here: with no TTY they would wait on stdin forever and hang the run.
+  // What matters is that selectMany still takes a preselect list — without it `sc setup`
+  // silently loses the "pre-tick whatever is broken" behaviour that makes it useful.
+  // (A defaulted param does not count toward Function.length, so check the signature text.)
+  assert.match(selectMany.toString(), /^function selectMany\(\s*title,\s*items,\s*preselected/,
+    'selectMany must accept (title, items, preselected)');
+});

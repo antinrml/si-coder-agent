@@ -19,6 +19,10 @@ description: "Quick-reference card for the whole SI-Coder /sc-* skill bundle —
 
 `providers` = configured (presence + format). `doctor` = actually works (real API call).
 
+Run `sc` with no arguments for an arrow-key menu. Any command that picks a provider or a
+target opens a list instead of asking you to type the name: `↑/↓` move, `Space` toggle
+(multi-select), `a` all/none, `Enter` confirm, `Esc` cancel.
+
 One-shot cheat sheet for the `/sc-*` deploy bundle. Show this, then route the user to the
 specific skill. Not a mode — display and stop.
 

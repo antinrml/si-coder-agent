@@ -18,7 +18,7 @@ const { isSecret, sourceLine, readShellRcEnv } =
   require(path.resolve(__dirname, '../skills/sc-onboarding/lib/onboarding-domains'));
 const { appendExportToShellRc, removeExportsFromShellRc, scanProcessEnv } =
   require(path.resolve(__dirname, '../lib/env'));
-const { askVisible, askHidden, redactValue, isInteractive, confirm } =
+const { askVisible, askHidden, redactValue, isInteractive, confirm, selectOne, selectMany } =
   require(path.resolve(__dirname, '../lib/prompt'));
 
 const byId = new Map(PROVIDERS.map(p => [p.id, p]));
@@ -101,7 +101,8 @@ function cmdProvidersList(args) {
   console.log('  sc providers show <id>   sc providers set <id>   sc doctor\n');
 }
 
-function cmdProvidersShow(id) {
+async function cmdProvidersShow(id) {
+  if (!id) id = await pickProvider('Show which provider?');
   const p = byId.get(id) || die(`unknown provider "${id}"`);
   const env = currentEnv();
   console.log(`\n🔌 ${p.id} — ${p.title}${p.status === 'stub' ? '  (STUB: script not implemented)' : ''}`);
@@ -115,6 +116,37 @@ function cmdProvidersShow(id) {
     if (src) console.log(`       ↳ ${src}`);
   }
   console.log('');
+}
+
+
+// A provider list shaped for the arrow-key pickers, annotated with live state so the user
+// can see what needs attention without leaving the menu.
+function providerItems() {
+  const env = currentEnv();
+  return PROVIDERS.map(p => {
+    const states = p.vars.map(v => varState(v, env));
+    const missing = states.filter(s => s === 'MISSING').length;
+    const invalid = states.filter(s => s === 'INVALID').length;
+    const set = states.filter(s => s === 'set').length;
+    let mark = '✅';
+    if (invalid) mark = '❗';
+    else if (missing) mark = '❌';
+    else if (!set) mark = '⚪';
+    return {
+      id: p.id,
+      label: `${mark} ${p.id.padEnd(14)} ${String(set).padStart(2)}/${p.vars.length}`,
+      hint: `${p.status === 'stub' ? '(stub) ' : ''}${p.blurb}`,
+      needsAttention: missing > 0 || invalid > 0,
+    };
+  });
+}
+
+// Pick one provider by arrow keys when the id was not given on the command line.
+async function pickProvider(title) {
+  if (!isInteractive()) die('provider id required on a non-TTY, e.g. `sc providers show cf`');
+  const id = await selectOne(title, providerItems());
+  if (!id) { console.log('cancelled'); process.exit(0); }
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,13 +194,13 @@ async function cmdSetup(args) {
   console.log('\n🚀 si-coder setup\n');
   let ids = resolveIds(args);
   if (!ids) {
-    console.log('Which providers? (comma-separated, Enter = the deploy core)\n');
-    for (const p of PROVIDERS) {
-      console.log(`  ${p.id.padEnd(14)} ${p.status === 'stub' ? '(stub) ' : ''}${p.blurb}`);
-    }
-    const ans = await askVisible('\nPick: ');
-    ids = ans.split(',').map(s => s.trim()).filter(Boolean);
-    if (ids.length === 0) ids = ['github', 'dokploy'];
+    const items = providerItems();
+    // Pre-tick whatever is actually incomplete: the common case is "fix what is broken",
+    // and starting from an empty list would make the user re-derive that by hand.
+    const pre = items.filter(i => i.needsAttention).map(i => i.id);
+    ids = await selectMany('Which providers do you want to set up?', items, pre);
+    if (ids === null) { console.log('cancelled'); return; }
+    if (ids.length === 0) { console.log('Nothing selected.'); return; }
   }
   const updates = await collect(ids, { force: Boolean(args.force) });
   if (Object.keys(updates).length === 0) { console.log('\n✅ Nothing to write — everything asked for is already set.'); return; }
@@ -179,6 +211,7 @@ async function cmdSetup(args) {
 
 async function cmdProvidersSet(id) {
   if (!isInteractive()) die('sc providers set needs a TTY.');
+  if (!id) id = await pickProvider('Re-enter credentials for which provider?');
   byId.get(id) || die(`unknown provider "${id}"`);
   console.log(`\n🔁 re-entering every var for "${id}" (existing values will be replaced)\n`);
   const updates = await collect([id], { force: true });
@@ -188,6 +221,7 @@ async function cmdProvidersSet(id) {
 }
 
 async function cmdProvidersRm(id, args) {
+  if (!id) id = await pickProvider('Remove credentials for which provider?');
   const p = byId.get(id) || die(`unknown provider "${id}"`);
   const keys = p.vars.map(v => v.key);
   console.log(`\nThis removes from the si-coder block in ~/.bashrc:\n  ${keys.join('\n  ')}\n`);
@@ -270,6 +304,37 @@ async function cmdPreflight(args) {
   die('still missing required credentials', 1);
 }
 
+
+// Bare `sc` on a terminal opens the console rather than printing a wall of usage. On a pipe
+// it still prints usage, so `sc | head` and scripts behave the way anyone would expect.
+async function cmdMenu() {
+  const action = await selectOne('sc — si-coder provider console', [
+    { id: 'providers', label: 'providers', hint: 'see what is configured' },
+    { id: 'setup',     label: 'setup    ', hint: 'fill in what is missing' },
+    { id: 'doctor',    label: 'doctor   ', hint: 'live check against each real API' },
+    { id: 'show',      label: 'show     ', hint: 'detail for one provider' },
+    { id: 'set',       label: 'set      ', hint: 'rotate one provider\'s credentials' },
+    { id: 'rm',        label: 'rm       ', hint: "remove one provider's vars from ~/.bashrc" },
+    { id: 'preflight', label: 'preflight', hint: 'check a /sc-all deploy target' },
+    { id: 'quit',      label: 'quit     ', hint: '' },
+  ]);
+  switch (action) {
+    case 'providers': return cmdProvidersList({});
+    case 'setup':     return cmdSetup({});
+    case 'doctor':    return cmdDoctor({});
+    case 'show':      return cmdProvidersShow(undefined);
+    case 'set':       return cmdProvidersSet(undefined);
+    case 'rm':        return cmdProvidersRm(undefined, {});
+    case 'preflight': {
+      const target = await selectOne('Which /sc-all target?', Object.entries(TARGET_PROVIDERS)
+        .map(([t, ids]) => ({ id: t, label: t.padEnd(9), hint: `needs: ${ids.join(', ')}` })));
+      if (!target) return;
+      return cmdPreflight({ target });
+    }
+    default: return;
+  }
+}
+
 // ---------------------------------------------------------------------------
 function usage() {
   console.log(`
@@ -304,7 +369,8 @@ async function main() {
     case 'setup':     return cmdSetup(args);
     case 'doctor':    return cmdDoctor(args);
     case 'preflight': return cmdPreflight(args);
-    case undefined:
+    case undefined:   return isInteractive() ? cmdMenu() : usage();
+    case 'menu':      return cmdMenu();
     case 'help':      return usage();
     default:          usage(); return die(`unknown command "${cmd}"`);
   }

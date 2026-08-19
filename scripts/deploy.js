@@ -507,16 +507,56 @@ async function run() {
   const { fetchDokploy, fetchGitHub } = makeFetchers({ baseUrl, apiKey, githubToken });
   const hostingerToken = process.env.HOSTINGER_API_TOKEN;
 
-  // M1 DRY: Hostinger A-record via lib/hostinger.configureDnsRecord (keep dns.lookup for server IP).
+  // M1 DRY: Hostinger A-record via lib/hostinger.configureDnsRecord.
+  // Two guards, both learned the hard way (see the antinrml.com audit, 2026-08-19):
+  //   1. lib/hostinger is hardcoded here, so this writes to the Hostinger zone whether or not
+  //      the domain is actually delegated there. antinrml.com is on Cloudflare -- the write
+  //      returns 200 against an INERT zone and nothing ever resolves. Check NS first and stop.
+  //   2. serverIp used to come from lookup(new URL(apiUrl).hostname). With the normal local
+  //      DOKPLOY_API_URL=http://127.0.0.1:3000/api that yields 127.0.0.1, i.e. an A record
+  //      pointing at loopback and an ACME challenge that retries forever. Require the public
+  //      IP explicitly and reject anything non-public.
+  const HOSTINGER_NS = /(^|\.)dns-parking\.com\.?$/i;
+
+  function assertPublicIpv4(ip, source) {
+    const o = String(ip).split('.').map(Number);
+    const bad = o.length !== 4 || o.some((n) => !Number.isInteger(n) || n < 0 || n > 255)
+      || o[0] === 0 || o[0] === 127 || o[0] === 10
+      || (o[0] === 172 && o[1] >= 16 && o[1] <= 31)
+      || (o[0] === 192 && o[1] === 168)
+      || (o[0] === 169 && o[1] === 254)
+      || (o[0] === 100 && o[1] >= 64 && o[1] <= 127); // CGNAT / tailnet
+    if (bad) throw new Error(`refusing to publish A record -> ${ip} (from ${source}): not a public IPv4`);
+    return ip;
+  }
+
+  async function resolveServerIp() {
+    if (process.env.DOKPLOY_PUBLIC_IP) {
+      return assertPublicIpv4(process.env.DOKPLOY_PUBLIC_IP, 'DOKPLOY_PUBLIC_IP');
+    }
+    const apiHost = new URL(apiUrl).hostname;
+    const { address } = await lookup(apiHost);
+    return assertPublicIpv4(address, `dns.lookup(${apiHost})`);
+  }
+
+  async function assertHostingerDelegation(fullDomain) {
+    const parts = String(fullDomain).split('.');
+    const rootDomain = parts.slice(-2).join('.');
+    const ns = await dns.promises.resolveNs(rootDomain);
+    if (!ns.some((n) => HOSTINGER_NS.test(n))) {
+      throw new Error(
+        `${rootDomain} is not delegated to Hostinger (NS: ${ns.join(', ')}). `
+        + 'Writing to the Hostinger zone would succeed but resolve nothing. Use /sc-cf for Cloudflare-delegated domains.',
+      );
+    }
+  }
+
   async function configureHostingerDNS(fullDomain) {
     if (!hostingerToken || !fullDomain) return;
-    try {
-      const apiHost = new URL(apiUrl).hostname;
-      const { address: serverIp } = await lookup(apiHost);
-      await configureDnsRecord({ fullDomain, type: 'A', target: serverIp, hostingerToken });
-    } catch (e) {
-      console.warn(`⚠️ Hostinger DNS configuration skipped due to error: ${e.message}`);
-    }
+    // Fail closed. A silently skipped DNS write used to surface much later as an ACME retry loop.
+    await assertHostingerDelegation(fullDomain);
+    const serverIp = await resolveServerIp();
+    await configureDnsRecord({ fullDomain, type: 'A', target: serverIp, hostingerToken });
   }
 
   // Fire-and-forget compose env mutation: merges `updates` into the stored compose env
